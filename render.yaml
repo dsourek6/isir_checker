@@ -1,0 +1,40 @@
+services:
+  - type: web
+    name: isir-monitor
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn app:app
+```
+
+### Step 2: Upload to GitHub (or use Render's direct upload)
+
+**Option A - GitHub (recommended):**
+1. Go to github.com and create a new repository
+2. Upload your 3 files
+3. Keep the repo public (or private if you have a paid plan)
+
+**Option B - Direct upload:**
+- Render also lets you upload files directly (but GitHub is better for updates)
+
+### Step 3: Deploy on Render
+
+1. Go to **render.com** and sign up/login
+2. Click **"New +"** → **"Web Service"**
+3. Connect your GitHub repo (or upload files)
+4. Configure:
+   - **Name:** `isir-monitor` (or whatever you want)
+   - **Environment:** `Python 3`
+   - **Build Command:** `pip install -r requirements.txt`
+   - **Start Command:** `gunicorn app:app --bind 0.0.0.0:$PORT`
+   - **Instance Type:** `Free`
+5. Click **"Create Web Service"**
+
+### Step 4: Wait for deployment (2-3 minutes)
+
+You'll see logs showing the build process. When it says "Deploy live", you're done!
+
+### Step 5: Access Your App
+
+Render will give you a URL like:
+```
+https://isir-monitor.onrender.com
