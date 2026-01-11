@@ -130,114 +130,280 @@ HTML_TEMPLATE = """
 <head>
     <title>ISIR Monitor</title>
     <meta name="viewport" content="width=device-width, initial-scale=1">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
     <style>
-        * { margin: 0; padding: 0; box-sizing: border-box; }
+        * { 
+            margin: 0; 
+            padding: 0; 
+            box-sizing: border-box; 
+        }
         body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            background: #0f172a;
             min-height: 100vh;
-            padding: 20px;
+            padding: 40px 20px;
+            position: relative;
+            overflow-x: hidden;
+        }
+        body::before {
+            content: '';
+            position: fixed;
+            top: -50%;
+            left: -50%;
+            width: 200%;
+            height: 200%;
+            background: 
+                radial-gradient(circle at 20% 50%, rgba(120, 119, 198, 0.3), transparent 50%),
+                radial-gradient(circle at 80% 80%, rgba(99, 102, 241, 0.3), transparent 50%),
+                radial-gradient(circle at 40% 20%, rgba(168, 85, 247, 0.2), transparent 50%);
+            animation: gradient 15s ease infinite;
+            z-index: 0;
+        }
+        @keyframes gradient {
+            0%, 100% { transform: translate(0, 0) rotate(0deg); }
+            50% { transform: translate(5%, 5%) rotate(180deg); }
         }
         .container {
-            max-width: 900px;
+            max-width: 1000px;
             margin: 0 auto;
-            background: white;
-            border-radius: 12px;
-            padding: 30px;
-            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+            background: rgba(30, 41, 59, 0.7);
+            backdrop-filter: blur(20px);
+            border: 1px solid rgba(148, 163, 184, 0.1);
+            border-radius: 24px;
+            padding: 40px;
+            box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
+            position: relative;
+            z-index: 1;
         }
-        h1 {
-            color: #333;
-            margin-bottom: 10px;
+        .header {
             display: flex;
             align-items: center;
-            gap: 10px;
+            gap: 16px;
+            margin-bottom: 12px;
+        }
+        .icon-wrapper {
+            width: 56px;
+            height: 56px;
+            background: linear-gradient(135deg, #6366f1 0%, #a855f7 100%);
+            border-radius: 16px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 28px;
+            box-shadow: 0 8px 16px rgba(99, 102, 241, 0.3);
+        }
+        h1 {
+            color: #f1f5f9;
+            font-size: 32px;
+            font-weight: 700;
+            letter-spacing: -0.5px;
         }
         .subtitle {
-            color: #666;
-            margin-bottom: 30px;
-            font-size: 14px;
+            color: #94a3b8;
+            margin-bottom: 40px;
+            font-size: 15px;
+            font-weight: 400;
         }
         .input-group {
-            margin-bottom: 20px;
+            margin-bottom: 24px;
         }
         label {
             display: block;
-            margin-bottom: 8px;
-            font-weight: 600;
-            color: #555;
+            margin-bottom: 10px;
+            font-weight: 500;
+            color: #cbd5e1;
+            font-size: 14px;
+            letter-spacing: 0.3px;
         }
         input[type="url"], input[type="number"] {
             width: 100%;
-            padding: 12px;
-            border: 2px solid #e0e0e0;
-            border-radius: 8px;
-            font-size: 14px;
-            transition: border-color 0.3s;
+            padding: 14px 16px;
+            background: rgba(15, 23, 42, 0.5);
+            border: 1px solid rgba(148, 163, 184, 0.2);
+            border-radius: 12px;
+            font-size: 15px;
+            color: #f1f5f9;
+            transition: all 0.3s ease;
+            font-family: 'Inter', sans-serif;
+        }
+        input[type="url"]::placeholder, input[type="number"]::placeholder {
+            color: #64748b;
         }
         input:focus {
             outline: none;
-            border-color: #667eea;
+            border-color: #6366f1;
+            background: rgba(15, 23, 42, 0.7);
+            box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.1);
+        }
+        .button-group {
+            display: flex;
+            gap: 12px;
+            flex-wrap: wrap;
         }
         .btn {
-            padding: 12px 24px;
+            padding: 14px 28px;
             border: none;
-            border-radius: 8px;
-            font-size: 16px;
+            border-radius: 12px;
+            font-size: 15px;
             font-weight: 600;
             cursor: pointer;
-            transition: all 0.3s;
+            transition: all 0.3s ease;
             display: inline-flex;
             align-items: center;
-            gap: 8px;
+            gap: 10px;
+            font-family: 'Inter', sans-serif;
+            letter-spacing: 0.3px;
         }
         .btn-primary {
-            background: #667eea;
+            background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%);
             color: white;
+            box-shadow: 0 4px 12px rgba(99, 102, 241, 0.4);
         }
         .btn-primary:hover {
-            background: #5568d3;
             transform: translateY(-2px);
-            box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4);
+            box-shadow: 0 8px 20px rgba(99, 102, 241, 0.5);
+        }
+        .btn-primary:active {
+            transform: translateY(0);
         }
         .btn-success {
-            background: #48bb78;
-            color: white;
+            background: rgba(16, 185, 129, 0.15);
+            color: #10b981;
+            border: 1px solid rgba(16, 185, 129, 0.3);
+        }
+        .btn-success:hover {
+            background: rgba(16, 185, 129, 0.25);
+            transform: translateY(-2px);
         }
         .status-box {
-            margin-top: 20px;
-            padding: 15px;
-            border-radius: 8px;
+            margin-top: 24px;
+            padding: 16px 20px;
+            border-radius: 12px;
             display: none;
+            font-size: 14px;
+            animation: slideDown 0.3s ease;
+        }
+        @keyframes slideDown {
+            from {
+                opacity: 0;
+                transform: translateY(-10px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
         }
         .status-box.show {
             display: block;
         }
         .status-success {
-            background: #f0fdf4;
-            border: 2px solid #48bb78;
-            color: #22543d;
+            background: rgba(16, 185, 129, 0.15);
+            border: 1px solid rgba(16, 185, 129, 0.3);
+            color: #6ee7b7;
         }
         .status-error {
-            background: #fef2f2;
-            border: 2px solid #f56565;
-            color: #742a2a;
+            background: rgba(239, 68, 68, 0.15);
+            border: 1px solid rgba(239, 68, 68, 0.3);
+            color: #fca5a5;
         }
         .status-info {
-            background: #eff6ff;
-            border: 2px solid #3b82f6;
-            color: #1e40af;
+            background: rgba(59, 130, 246, 0.15);
+            border: 1px solid rgba(59, 130, 246, 0.3);
+            color: #93c5fd;
+        }
+        .monitoring-status {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            padding: 16px 20px;
+            background: rgba(16, 185, 129, 0.1);
+            border: 1px solid rgba(16, 185, 129, 0.2);
+            border-radius: 12px;
+            margin: 24px 0;
+            color: #6ee7b7;
+            font-size: 14px;
+            font-weight: 500;
+        }
+        .pulse {
+            width: 10px;
+            height: 10px;
+            background: #10b981;
+            border-radius: 50%;
+            box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.7);
+            animation: pulse-ring 2s infinite;
+        }
+        @keyframes pulse-ring {
+            0% {
+                box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.7);
+            }
+            50% {
+                box-shadow: 0 0 0 8px rgba(16, 185, 129, 0);
+            }
+            100% {
+                box-shadow: 0 0 0 0 rgba(16, 185, 129, 0);
+            }
+        }
+        .stats {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 20px;
+            margin: 32px 0;
+        }
+        .stat-card {
+            background: rgba(15, 23, 42, 0.5);
+            border: 1px solid rgba(148, 163, 184, 0.1);
+            padding: 24px;
+            border-radius: 16px;
+            text-align: center;
+            transition: all 0.3s ease;
+        }
+        .stat-card:hover {
+            transform: translateY(-4px);
+            border-color: rgba(99, 102, 241, 0.3);
+            box-shadow: 0 8px 24px rgba(0, 0, 0, 0.2);
+        }
+        .stat-value {
+            font-size: 36px;
+            font-weight: 700;
+            background: linear-gradient(135deg, #6366f1 0%, #a855f7 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+            margin-bottom: 8px;
+        }
+        .stat-label {
+            font-size: 13px;
+            color: #94a3b8;
+            font-weight: 500;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
         }
         .new-entries {
-            margin-top: 30px;
+            margin-top: 40px;
+        }
+        .entries-header {
+            color: #f1f5f9;
+            font-size: 20px;
+            font-weight: 600;
+            margin-bottom: 20px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
         }
         .entry-item {
-            background: #fef3c7;
-            border-left: 4px solid #f59e0b;
-            padding: 15px;
-            margin-bottom: 15px;
-            border-radius: 6px;
-            animation: slideIn 0.3s ease-out;
+            background: rgba(251, 191, 36, 0.1);
+            border-left: 3px solid #fbbf24;
+            padding: 20px;
+            margin-bottom: 16px;
+            border-radius: 12px;
+            animation: slideIn 0.4s ease-out;
+            transition: all 0.3s ease;
+        }
+        .entry-item:hover {
+            background: rgba(251, 191, 36, 0.15);
+            transform: translateX(4px);
         }
         @keyframes slideIn {
             from {
@@ -250,64 +416,27 @@ HTML_TEMPLATE = """
             }
         }
         .entry-text {
-            color: #78350f;
-            margin-bottom: 8px;
+            color: #fde68a;
+            margin-bottom: 10px;
+            line-height: 1.6;
+            font-size: 14px;
         }
         .entry-time {
             font-size: 12px;
-            color: #92400e;
-        }
-        .monitoring-status {
-            display: flex;
-            align-items: center;
-            gap: 8px;
-            padding: 12px;
-            background: #f3f4f6;
-            border-radius: 8px;
-            margin-bottom: 20px;
-        }
-        .pulse {
-            width: 12px;
-            height: 12px;
-            background: #10b981;
-            border-radius: 50%;
-            animation: pulse 2s infinite;
-        }
-        @keyframes pulse {
-            0%, 100% { opacity: 1; }
-            50% { opacity: 0.5; }
-        }
-        .stats {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
-            gap: 15px;
-            margin: 20px 0;
-        }
-        .stat-card {
-            background: #f9fafb;
-            padding: 15px;
-            border-radius: 8px;
-            text-align: center;
-        }
-        .stat-value {
-            font-size: 28px;
-            font-weight: bold;
-            color: #667eea;
-        }
-        .stat-label {
-            font-size: 12px;
-            color: #6b7280;
-            margin-top: 5px;
+            color: #fcd34d;
+            font-weight: 500;
         }
     </style>
 </head>
 <body>
     <div class="container">
-        <h1>
-            <span style="font-size: 32px;">🔔</span>
-            ISIR Monitor
-        </h1>
-        <p class="subtitle">Monitor Czech Insolvency Register from anywhere</p>
+        <div class="header">
+            <div class="icon-wrapper">🔔</div>
+            <div>
+                <h1>ISIR Monitor</h1>
+            </div>
+        </div>
+        <p class="subtitle">Monitor Czech Insolvency Register from anywhere, in real-time</p>
         
         <div class="input-group">
             <label for="url">ISIR Page URL</label>
@@ -319,12 +448,14 @@ HTML_TEMPLATE = """
             <input type="number" id="interval" value="5" min="1">
         </div>
         
-        <button class="btn btn-primary" onclick="startMonitoring()">
-            ▶ Start Monitoring
-        </button>
-        <button class="btn btn-success" onclick="checkNow()" style="margin-left: 10px;">
-            🔄 Check Now
-        </button>
+        <div class="button-group">
+            <button class="btn btn-primary" onclick="startMonitoring()">
+                ▶ Start Monitoring
+            </button>
+            <button class="btn btn-success" onclick="checkNow()">
+                🔄 Check Now
+            </button>
+        </div>
         
         <div id="status" class="status-box"></div>
         
@@ -348,7 +479,11 @@ HTML_TEMPLATE = """
             </div>
         </div>
         
-        <div class="new-entries" id="newEntries"></div>
+        <div class="new-entries" id="newEntries">
+            <h2 class="entries-header" style="display: none;" id="entriesHeader">
+                ⚡ New Entries Detected
+            </h2>
+        </div>
     </div>
     
     <script>
@@ -419,14 +554,17 @@ HTML_TEMPLATE = """
         
         function displayNewEntries(items) {
             const container = document.getElementById('newEntries');
+            const header = document.getElementById('entriesHeader');
+            header.style.display = 'flex';
+            
             items.forEach(item => {
                 const div = document.createElement('div');
                 div.className = 'entry-item';
                 div.innerHTML = `
                     <div class="entry-text">${item.text}</div>
-                    <div class="entry-time">Detected: ${new Date(item.timestamp).toLocaleString('cs-CZ')}</div>
+                    <div class="entry-time">⏰ Detected: ${new Date(item.timestamp).toLocaleString('cs-CZ')}</div>
                 `;
-                container.insertBefore(div, container.firstChild);
+                container.insertBefore(div, container.children[1]);
             });
         }
         
