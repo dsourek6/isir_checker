@@ -1,624 +1,914 @@
-"""
-ISIR Web Monitor - Flask Application
-Deploy to Render.com, Railway.app, or PythonAnywhere (all have free tiers)
-"""
-
-from flask import Flask, render_template, jsonify, request
+from flask import Flask, jsonify, request
 from flask_cors import CORS
 import requests
 from bs4 import BeautifulSoup
-import hashlib
-import json
-from datetime import datetime
-from pathlib import Path
-import threading
-import time
+import re
+from typing import Dict, Any
 
 app = Flask(__name__)
 CORS(app)
 
-# Configuration
-CONFIG = {
-    "check_interval": 300,  # 5 minutes
-    "state_file": "isir_state.json",
-    "monitored_urls": {}  # Will store multiple URLs with their states
-}
-
 class ISIRChecker:
+    """
+    Main class that handles checking the ISIR website for updates.
+    Keeps track of which entries we've already seen so we can detect new ones.
+    """
     def __init__(self):
-        self.state_file = Path(CONFIG["state_file"])
-        self.load_state()
-        self.new_entries = []
-        self.last_check = None
-        self.is_monitoring = False
-        
-    def load_state(self):
-        if self.state_file.exists():
-            try:
-                with open(self.state_file, 'r', encoding='utf-8') as f:
-                    CONFIG["monitored_urls"] = json.load(f)
-            except:
-                CONFIG["monitored_urls"] = {}
-        
-    def save_state(self):
-        try:
-            with open(self.state_file, 'w', encoding='utf-8') as f:
-                json.dump(CONFIG["monitored_urls"], f, ensure_ascii=False, indent=2)
-        except Exception as e:
-            print(f"Error saving state: {e}")
+        # Set to store IDs we've already seen (e.g., "C1 - 1.", "A2 - 3.")
+        self.seen_ids = set()
     
-    def fetch_and_parse(self, url):
+    def natural_sort_key(self, s: str):
+        """
+        Helper function for sorting strings with numbers naturally.
+        Example: ["C1", "C2", "C10"] instead of ["C1", "C10", "C2"]
+        Splits string into text and number parts for proper sorting.
+        """
+        return [int(text) if text.isdigit() else text.lower() for text in re.split('([0-9]+)', s)]
+
+    def fetch_and_parse(self, url: str) -> Dict[str, Any]:
+        """
+        Main function that:
+        1. Fetches the HTML from the ISIR URL
+        2. Parses it to extract case info and all entries
+        3. Organizes entries by section (A, B, C, D, P)
+        4. Returns structured data ready for display
+        """
         try:
-            headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-            }
-            response = requests.get(url, headers=headers, timeout=30)
-            response.raise_for_status()
+            # === STEP 1: FETCH THE PAGE ===
+            headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36'}
+            response = requests.get(url, headers=headers, timeout=20)
+            response.raise_for_status()  # Raises error if request failed
             
+            # === STEP 2: PARSE HTML ===
             soup = BeautifulSoup(response.text, 'html.parser')
-            entries = {}
+            sections = {}  # Will store entries organized by section letter
+            current_batch_ids = set()  # IDs found in this check (to track new ones)
             
-            # Parse table rows
-            rows = soup.find_all('tr')[1:] if soup.find_all('tr') else []
+            # Extract case information
+            case_info = {}
+            detail_table = soup.find('table', {'class': 'evidenceUpadcuDetail'})
+            if detail_table:
+                rows = detail_table.find_all('tr')
+                for row in rows:
+                    cells = row.find_all('td')
+                    if len(cells) >= 2:
+                        label_cell = cells[0] if len(cells) > 1 else cells[0]
+                        value_cell = cells[-1]
+                        
+                        label = label_cell.get_text(separator=' ', strip=True)
+                        
+                        if 'nadpis' in str(row).lower():
+                            h2_tags = row.find_all('h2')
+                            if len(h2_tags) >= 2:
+                                case_info['name'] = h2_tags[1].get_text(separator=' ', strip=True)
+                        elif 'Aktuální stav' in label:
+                            case_info['status'] = value_cell.get_text(separator=' ', strip=True)
+                        elif 'Spisová značka' in label:
+                            # Parse the cell to extract bold parts properly
+                            raw_html = str(value_cell)
+                            # Extract case number (in strong tag)
+                            case_num_match = re.search(r'<strong>\s*([^<]+)\s*</strong>', raw_html)
+                            case_number = case_num_match.group(1).strip() if case_num_match else ''
+                            
+                            # Extract court name (in strong tag with font color)
+                            court_match = re.search(r'<strong>\s*<font[^>]*>\s*([^<]+)\s*</font>\s*</strong>', raw_html)
+                            court_name = court_match.group(1).strip() if court_match else ''
+                            
+                            case_info['case_number'] = case_number
+                            case_info['court'] = court_name
             
-            for row in rows:
-                text = row.get_text(strip=True, separator=' ')
-                if not text or len(text) < 10:
+            section_divs = soup.find_all('div', id=lambda x: x and x.startswith('zalozka'))
+            
+            for section_div in section_divs:
+                section_letter = section_div.get('id', '').replace('zalozka', '').upper()
+                if section_letter not in ['A', 'B', 'C', 'D', 'P']: continue
+                
+                table = section_div.find('table', {'class': 'evidenceUpadcuDetailTable'})
+                if not table:
+                    sections[section_letter] = []
                     continue
+                
+                rows = table.find_all('tr')[1:]
+                rows.reverse() 
+                
+                parsed_entries = []
+                group_metadata = {}  # Store metadata like case numbers for C/P sections
+                
+                for row in rows:
+                    cells = row.find_all('td')
+                    if len(cells) < 5: continue
                     
-                entry_hash = hashlib.md5(text.encode()).hexdigest()
-                entries[entry_hash] = {
-                    'text': text[:500],
-                    'timestamp': datetime.now().isoformat()
-                }
+                    # === EXTRACT BASIC INFO ===
+                    # Added separator=' ' to ensure multiline text in cells (like address or description) is separated by spaces
+                    doc_id = cells[0].get_text(separator=' ', strip=True)  
+                    time_str = f"{cells[1].get_text(separator=' ', strip=True)} {cells[2].get_text(separator=' ', strip=True)}"
+                    desc = cells[3].get_text(separator=' ', strip=True)
+                    
+                    # === CHECK IF ENTRY IS GREYED OUT (INVALID/UNAVAILABLE) ===
+                    # Greyed entries don't have the 'posledniCislo' class in their spans
+                    is_greyed = False
+                    first_span = cells[0].find('span')
+                    if first_span:
+                        span_classes = first_span.get('class', [])
+                        # If the span doesn't have 'posledniCislo' class, it's greyed out
+                        if 'posledniCislo' not in span_classes:
+                            is_greyed = True
+                    
+                    # === FIND PDF LINK ===
+                    # We need to search through multiple cells because PDF links can be in different columns
+                    pdf_url = None
+                    has_valid_doc = False
+                    
+                    # Search ALL cells for PDF links (not just specific columns)
+                    for cell in cells:
+                        # Method 1: Check for direct HREF links (most common now)
+                        # Look for <a href="/isir/doc/dokument.PDF?id=...">
+                        href_link = cell.find('a', href=re.compile(r'dokument\.PDF\?id=', re.IGNORECASE))
+                        if href_link:
+                            raw_href = href_link['href']
+                            # Construct absolute URL
+                            if raw_href.startswith('/'):
+                                pdf_url = f"https://isir.justice.cz{raw_href}"
+                            else:
+                                pdf_url = raw_href if raw_href.startswith('http') else f"https://isir.justice.cz/{raw_href}"
+                            has_valid_doc = True
+                            break
+
+                        # Method 2: Check for ONCLICK links (legacy/fallback)
+                        # Find ANY element with onclick attribute (sometimes it's on <img>, sometimes on <a>)
+                        elements_with_onclick = cell.find_all(attrs={"onclick": True})
+                        
+                        for element in elements_with_onclick:
+                            onclick_val = element['onclick']
+                            # Extract document ID from: zobrazDokument('12345')
+                            # Regex handles single quotes, double quotes, and spaces
+                            match = re.search(r"zobrazDokument\s*\(\s*['\"]?(\d+)['\"]?\s*\)", onclick_val)
+                            
+                            if match:
+                                doc_id_extracted = match.group(1)
+                                pdf_url = f"https://isir.justice.cz/isir/doc/dokument.PDF?id={doc_id_extracted}"
+                                has_valid_doc = True
+                                break
+                        if has_valid_doc:
+                            break
+                    
+                    # If no PDF found, mark as unavailable
+                    if not pdf_url:
+                        pdf_url = "#"
+                    
+                    # === EXTRACT METADATA FOR SECTIONS C AND P ===
+                    additional_info = ""
+                    
+                    if section_letter == 'C' and len(cells) > 8:
+                        # For section C: Get "Spisová značka incidenčního sporu" from column 8
+                        case_mark = cells[8].get_text(separator=' ', strip=True)
+                        if case_mark and case_mark not in ['&nbsp;', '']:
+                            additional_info = case_mark
+                            # Store this metadata for the group (e.g., "C1")
+                            prefix_match = re.match(f'({section_letter}\\d+)', doc_id)
+                            if prefix_match:
+                                group_key = prefix_match.group(1)
+                                if group_key not in group_metadata:
+                                    group_metadata[group_key] = additional_info
+                    
+                    elif section_letter == 'P' and len(cells) > 6:
+                        # For section P: Get "Platní věřitelé" from column 7 (index 6)
+                        # Note: Index 6 because lists are 0-indexed (column 7 = index 6)
+                        platni_cell = cells[8].get_text(separator=' ', strip=True)
+                        if platni_cell and platni_cell not in ['&nbsp;', '']:
+                            additional_info = platni_cell
+                            prefix_match = re.match(f'({section_letter}\\d+)', doc_id)
+                            if prefix_match:
+                                group_key = prefix_match.group(1)
+                                if group_key not in group_metadata:
+                                    group_metadata[group_key] = additional_info
+                    
+                    # === CHECK IF THIS IS A NEW ENTRY ===
+                    # New entries are ones we haven't seen before (only after first check)
+                    is_new = doc_id not in self.seen_ids and len(self.seen_ids) > 0
+                    current_batch_ids.add(doc_id)
+
+                    # === ADD ENTRY TO LIST ===
+                    parsed_entries.append({
+                        "id": doc_id, 
+                        "time": time_str, 
+                        "desc": desc, 
+                        "pdf_url": pdf_url, 
+                        "is_new": is_new,
+                        "additional_info": additional_info,
+                        "is_greyed": is_greyed,
+                        "has_valid_doc": has_valid_doc
+                    })
+
+                # === STEP 6: ORGANIZE ENTRIES FOR C AND P SECTIONS ===
+                # These sections are grouped (e.g., C1, C2) with multiple sub-entries
+                if section_letter in ['C', 'P']:
+                    groups = {}
+                    prefix_pattern = re.compile(f'({section_letter}\\d+)')
+                    
+                    # Group entries by their prefix (C1, C2, etc.)
+                    for entry in parsed_entries:
+                        match = prefix_pattern.match(entry['id'])
+                        group_key = match.group(1) if match else "Other"
+                        
+                        if group_key not in groups: 
+                            groups[group_key] = {
+                                "entries": [],
+                                "metadata": group_metadata.get(group_key, "")
+                            }
+                        groups[group_key]["entries"].append(entry)
+                    
+                    # Sort groups naturally (C1, C2, C10 not C1, C10, C2)
+                    sorted_keys = sorted(groups.keys(), key=self.natural_sort_key)
+                    sections[section_letter] = [
+                        {
+                            "group": key, 
+                            "entries": groups[key]["entries"],
+                            "metadata": groups[key]["metadata"]
+                        } 
+                        for key in sorted_keys
+                    ]
+                else:
+                    # For A, B, D sections: just list all entries (no grouping)
+                    sections[section_letter] = parsed_entries
             
-            return entries, None
+            # === STEP 7: UPDATE SEEN IDs ===
+            # Remember all IDs from this check so we can detect new ones next time
+            self.seen_ids.update(current_batch_ids)
+            
+            # === STEP 8: RETURN RESULTS ===
+            return {"status": "success", "sections": sections, "case_info": case_info}
+            
         except Exception as e:
-            return None, str(e)
-    
-    def check_url(self, url):
-        current_entries, error = self.fetch_and_parse(url)
-        
-        if error:
-            return {"status": "error", "message": error}
-        
-        if url not in CONFIG["monitored_urls"]:
-            CONFIG["monitored_urls"][url] = {
-                "entries": current_entries,
-                "last_check": datetime.now().isoformat(),
-                "new_count": 0
-            }
-            self.save_state()
-            return {
-                "status": "initialized",
-                "message": "URL added to monitoring",
-                "count": len(current_entries)
-            }
-        
-        previous = CONFIG["monitored_urls"][url]["entries"]
-        new_hashes = set(current_entries.keys()) - set(previous.keys())
-        
-        new_items = []
-        if new_hashes:
-            for h in new_hashes:
-                new_items.append(current_entries[h])
-                self.new_entries.append({
-                    "url": url,
-                    "entry": current_entries[h],
-                    "detected_at": datetime.now().isoformat()
-                })
-            
-            CONFIG["monitored_urls"][url]["entries"] = current_entries
-            CONFIG["monitored_urls"][url]["new_count"] = len(new_hashes)
-        
-        CONFIG["monitored_urls"][url]["last_check"] = datetime.now().isoformat()
-        self.save_state()
-        
-        return {
-            "status": "checked",
-            "new_entries": len(new_hashes),
-            "total_entries": len(current_entries),
-            "items": new_items
-        }
+            # If anything goes wrong, return error message
+            return {"status": "error", "message": str(e)}
 
 checker = ISIRChecker()
 
-# HTML Template
 HTML_TEMPLATE = """
 <!DOCTYPE html>
-<html>
+<html lang="cs">
 <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>ISIR Monitor</title>
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
     <style>
-        * { 
-            margin: 0; 
-            padding: 0; 
-            box-sizing: border-box; 
-        }
-        body {
-            font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-            background: #0f172a;
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        
+        body { 
+            font-family: 'Inter', sans-serif; 
+            background: radial-gradient(ellipse at top left, #1a0b0f 0%, #0a0a0a 50%, #000000 100%);
+            background-attachment: fixed;
+            color: #e5e5e5; 
             min-height: 100vh;
-            padding: 40px 20px;
-            position: relative;
-            overflow-x: hidden;
-        }
-        body::before {
-            content: '';
-            position: fixed;
-            top: -50%;
-            left: -50%;
-            width: 200%;
-            height: 200%;
-            background: 
-                radial-gradient(circle at 20% 50%, rgba(120, 119, 198, 0.3), transparent 50%),
-                radial-gradient(circle at 80% 80%, rgba(99, 102, 241, 0.3), transparent 50%),
-                radial-gradient(circle at 40% 20%, rgba(168, 85, 247, 0.2), transparent 50%);
-            animation: gradient 15s ease infinite;
-            z-index: 0;
-        }
-        @keyframes gradient {
-            0%, 100% { transform: translate(0, 0) rotate(0deg); }
-            50% { transform: translate(5%, 5%) rotate(180deg); }
-        }
-        .container {
-            max-width: 1000px;
-            margin: 0 auto;
-            background: rgba(30, 41, 59, 0.7);
-            backdrop-filter: blur(20px);
-            border: 1px solid rgba(148, 163, 184, 0.1);
-            border-radius: 24px;
-            padding: 40px;
-            box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
-            position: relative;
-            z-index: 1;
-        }
-        .header {
-            display: flex;
-            align-items: center;
-            gap: 16px;
-            margin-bottom: 12px;
-        }
-        .icon-wrapper {
-            width: 56px;
-            height: 56px;
-            background: linear-gradient(135deg, #6366f1 0%, #a855f7 100%);
-            border-radius: 16px;
             display: flex;
             align-items: center;
             justify-content: center;
-            font-size: 28px;
-            box-shadow: 0 8px 16px rgba(99, 102, 241, 0.3);
+            padding: 40px 20px;
         }
-        h1 {
-            color: #f1f5f9;
-            font-size: 32px;
-            font-weight: 700;
-            letter-spacing: -0.5px;
-        }
-        .subtitle {
-            color: #94a3b8;
-            margin-bottom: 40px;
-            font-size: 15px;
-            font-weight: 400;
-        }
-        .input-group {
-            margin-bottom: 24px;
-        }
-        label {
-            display: block;
-            margin-bottom: 10px;
-            font-weight: 500;
-            color: #cbd5e1;
-            font-size: 14px;
-            letter-spacing: 0.3px;
-        }
-        input[type="url"], input[type="number"] {
+
+        .landing-container {
+            max-width: 700px;
             width: 100%;
-            padding: 14px 16px;
-            background: rgba(15, 23, 42, 0.5);
-            border: 1px solid rgba(148, 163, 184, 0.2);
-            border-radius: 12px;
+            text-align: center;
+        }
+
+        .logo-landing {
+            font-size: 48px;
+            font-weight: 800;
+            margin-bottom: 16px;
+            background: linear-gradient(135deg, #ff6b35 0%, #f7931e 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            letter-spacing: -1px;
+        }
+
+        .subtitle-landing {
+            color: #666;
+            margin-bottom: 50px;
+            font-size: 16px;
+        }
+
+        .search-landing {
+            position: relative;
+            margin-bottom: 30px;
+        }
+
+        .search-landing input {
+            width: 100%;
+            padding: 20px 28px;
+            background: rgba(255, 255, 255, 0.03);
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            border-radius: 16px;
+            color: white;
             font-size: 15px;
-            color: #f1f5f9;
-            transition: all 0.3s ease;
-            font-family: 'Inter', sans-serif;
+            font-family: 'Inter';
+            transition: all 0.4s ease;
         }
-        input[type="url"]::placeholder, input[type="number"]::placeholder {
-            color: #64748b;
-        }
-        input:focus {
+
+        .search-landing input:focus {
             outline: none;
-            border-color: #6366f1;
-            background: rgba(15, 23, 42, 0.7);
-            box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.1);
+            background: rgba(255, 255, 255, 0.05);
+            border-color: rgba(255, 107, 53, 0.4);
+            box-shadow: 0 0 0 4px rgba(255, 107, 53, 0.1);
         }
-        .button-group {
-            display: flex;
-            gap: 12px;
-            flex-wrap: wrap;
-        }
-        .btn {
-            padding: 14px 28px;
+
+        .btn-start {
+            padding: 18px 48px;
+            background: linear-gradient(135deg, #ff6b35 0%, #f7931e 100%);
             border: none;
-            border-radius: 12px;
-            font-size: 15px;
-            font-weight: 600;
+            border-radius: 14px;
+            color: white;
+            font-weight: 700;
+            font-size: 16px;
             cursor: pointer;
             transition: all 0.3s ease;
-            display: inline-flex;
-            align-items: center;
-            gap: 10px;
-            font-family: 'Inter', sans-serif;
-            letter-spacing: 0.3px;
+            box-shadow: 0 8px 30px rgba(255, 107, 53, 0.3);
+            position: relative;
+            overflow: hidden;
         }
-        .btn-primary {
-            background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%);
-            color: white;
-            box-shadow: 0 4px 12px rgba(99, 102, 241, 0.4);
+
+        .btn-start::before {
+            content: '';
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            width: 0;
+            height: 0;
+            border-radius: 50%;
+            background: rgba(255, 255, 255, 0.2);
+            transform: translate(-50%, -50%);
+            transition: width 0.6s, height 0.6s;
         }
-        .btn-primary:hover {
+
+        .btn-start:hover::before {
+            width: 300px;
+            height: 300px;
+        }
+
+        .btn-start:hover {
             transform: translateY(-2px);
-            box-shadow: 0 8px 20px rgba(99, 102, 241, 0.5);
+            box-shadow: 0 12px 40px rgba(255, 107, 53, 0.4);
         }
-        .btn-primary:active {
-            transform: translateY(0);
+
+        @keyframes pulse {
+            0%, 100% { box-shadow: 0 8px 30px rgba(255, 107, 53, 0.3); }
+            50% { box-shadow: 0 8px 50px rgba(255, 107, 53, 0.5); }
         }
-        .btn-success {
-            background: rgba(16, 185, 129, 0.15);
-            color: #10b981;
-            border: 1px solid rgba(16, 185, 129, 0.3);
+
+        .btn-start {
+            animation: pulse 2s infinite;
+            position: relative;
+            z-index: 1;
         }
-        .btn-success:hover {
-            background: rgba(16, 185, 129, 0.25);
-            transform: translateY(-2px);
-        }
-        .status-box {
-            margin-top: 24px;
-            padding: 16px 20px;
-            border-radius: 12px;
+
+        .loader {
+            position: fixed;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
             display: none;
-            font-size: 14px;
-            animation: slideDown 0.3s ease;
+            flex-direction: column;
+            align-items: center;
+            gap: 20px;
+            z-index: 1000;
         }
-        @keyframes slideDown {
-            from {
-                opacity: 0;
-                transform: translateY(-10px);
-            }
-            to {
-                opacity: 1;
-                transform: translateY(0);
-            }
+
+        .loader.active {
+            display: flex;
+            animation: fadeIn 0.3s ease;
         }
-        .status-box.show {
-            display: block;
+
+        .spinner {
+            width: 60px;
+            height: 60px;
+            border: 4px solid rgba(255, 107, 53, 0.1);
+            border-top-color: #ff6b35;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
         }
-        .status-success {
-            background: rgba(16, 185, 129, 0.15);
-            border: 1px solid rgba(16, 185, 129, 0.3);
-            color: #6ee7b7;
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
         }
-        .status-error {
-            background: rgba(239, 68, 68, 0.15);
-            border: 1px solid rgba(239, 68, 68, 0.3);
-            color: #fca5a5;
+
+        .loader-text {
+            color: #ff6b35;
+            font-weight: 600;
+            font-size: 16px;
         }
-        .status-info {
-            background: rgba(59, 130, 246, 0.15);
-            border: 1px solid rgba(59, 130, 246, 0.3);
-            color: #93c5fd;
-        }
-        .monitoring-status {
+
+        .status-indicator {
             display: flex;
             align-items: center;
-            gap: 12px;
-            padding: 16px 20px;
-            background: rgba(16, 185, 129, 0.1);
-            border: 1px solid rgba(16, 185, 129, 0.2);
-            border-radius: 12px;
-            margin: 24px 0;
-            color: #6ee7b7;
-            font-size: 14px;
-            font-weight: 500;
+            gap: 8px;
         }
-        .pulse {
-            width: 10px;
-            height: 10px;
+
+        .live-dot {
+            width: 8px;
+            height: 8px;
             background: #10b981;
             border-radius: 50%;
-            box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.7);
-            animation: pulse-ring 2s infinite;
+            animation: livePulse 2s ease-in-out infinite;
         }
-        @keyframes pulse-ring {
-            0% {
+
+        @keyframes livePulse {
+            0%, 100% {
                 box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.7);
             }
             50% {
                 box-shadow: 0 0 0 8px rgba(16, 185, 129, 0);
             }
-            100% {
-                box-shadow: 0 0 0 0 rgba(16, 185, 129, 0);
-            }
         }
-        .stats {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-            gap: 20px;
-            margin: 32px 0;
+
+        .dashboard { 
+            max-width: 1200px;
+            width: 100%;
+            background: rgba(20, 20, 20, 0.6);
+            backdrop-filter: blur(20px);
+            border: 1px solid rgba(255, 255, 255, 0.05);
+            border-radius: 24px;
+            box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.8);
+            overflow: hidden;
+            display: none;
+            animation: slideIn 0.5s ease;
         }
-        .stat-card {
-            background: rgba(15, 23, 42, 0.5);
-            border: 1px solid rgba(148, 163, 184, 0.1);
-            padding: 24px;
-            border-radius: 16px;
-            text-align: center;
-            transition: all 0.3s ease;
+
+        @keyframes slideIn {
+            from { opacity: 0; transform: translateY(20px); }
+            to { opacity: 1; transform: translateY(0); }
         }
-        .stat-card:hover {
-            transform: translateY(-4px);
-            border-color: rgba(99, 102, 241, 0.3);
-            box-shadow: 0 8px 24px rgba(0, 0, 0, 0.2);
+
+        .header { 
+            padding: 30px 40px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+            background: linear-gradient(90deg, rgba(255, 107, 53, 0.05) 0%, transparent 100%);
         }
-        .stat-value {
-            font-size: 36px;
-            font-weight: 700;
-            background: linear-gradient(135deg, #6366f1 0%, #a855f7 100%);
+
+        .logo {
+            font-size: 24px;
+            font-weight: 800;
+            background: linear-gradient(135deg, #ff6b35 0%, #f7931e 100%);
             -webkit-background-clip: text;
             -webkit-text-fill-color: transparent;
-            background-clip: text;
-            margin-bottom: 8px;
         }
-        .stat-label {
-            font-size: 13px;
-            color: #94a3b8;
-            font-weight: 500;
-            text-transform: uppercase;
-            letter-spacing: 0.5px;
-        }
-        .new-entries {
-            margin-top: 40px;
-        }
-        .entries-header {
-            color: #f1f5f9;
-            font-size: 20px;
-            font-weight: 600;
-            margin-bottom: 20px;
+
+        .header-right {
             display: flex;
             align-items: center;
-            gap: 10px;
+            gap: 24px;
         }
-        .entry-item {
-            background: rgba(251, 191, 36, 0.1);
-            border-left: 3px solid #fbbf24;
-            padding: 20px;
-            margin-bottom: 16px;
-            border-radius: 12px;
-            animation: slideIn 0.4s ease-out;
-            transition: all 0.3s ease;
-        }
-        .entry-item:hover {
-            background: rgba(251, 191, 36, 0.15);
-            transform: translateX(4px);
-        }
-        @keyframes slideIn {
-            from {
-                opacity: 0;
-                transform: translateX(-20px);
-            }
-            to {
-                opacity: 1;
-                transform: translateX(0);
-            }
-        }
-        .entry-text {
-            color: #fde68a;
-            margin-bottom: 10px;
-            line-height: 1.6;
+
+        .timer {
+            color: #666;
             font-size: 14px;
         }
-        .entry-time {
-            font-size: 12px;
-            color: #fcd34d;
+
+        .timer span {
+            color: #ff6b35;
+            font-weight: 700;
+        }
+
+        .case-info-box {
+            margin: 30px 40px;
+            padding: 30px;
+            background: linear-gradient(135deg, rgba(255, 107, 53, 0.08) 0%, rgba(247, 147, 30, 0.08) 100%);
+            border: 1px solid rgba(255, 107, 53, 0.2);
+            border-radius: 16px;
+        }
+
+        .case-info-title {
+            font-size: 28px;
+            font-weight: 700;
+            margin-bottom: 20px;
+            color: #fff;
+        }
+
+        .case-info-row {
+            display: grid;
+            grid-template-columns: 200px 1fr;
+            padding: 12px 0;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+        }
+
+        .case-info-row:last-child {
+            border-bottom: none;
+        }
+
+        .case-info-label {
+            color: #888;
+            font-size: 14px;
+        }
+
+        .case-info-value {
+            color: #fff;
             font-weight: 500;
+            line-height: 1.6;
+        }
+
+        .case-info-value strong {
+            font-weight: 700;
+        }
+
+        .group-header-meta {
+            color: #ff6b35;
+            font-size: 12px;
+            font-weight: 500;
+            margin-top: 4px;
+        }
+
+        .tabs {
+            display: flex;
+            padding: 0 40px;
+            background: rgba(0, 0, 0, 0.3);
+            overflow-x: auto;
+        }
+
+        .tab {
+            padding: 18px 28px;
+            cursor: pointer;
+            color: #666;
+            transition: all 0.3s;
+            font-weight: 600;
+            font-size: 14px;
+            border-bottom: 3px solid transparent;
+            white-space: nowrap;
+        }
+
+        .tab:hover {
+            color: #999;
+            background: rgba(255, 255, 255, 0.02);
+        }
+
+        .tab.active {
+            color: #ff6b35;
+            border-bottom-color: #ff6b35;
+            background: rgba(255, 107, 53, 0.05);
+        }
+
+        .content-section {
+            display: none;
+            padding-bottom: 30px;
+        }
+
+        .content-section.active {
+            display: block;
+            animation: fadeIn 0.4s ease;
+        }
+
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        .entry-item {
+            padding: 24px 40px;
+            display: grid;
+            grid-template-columns: 140px 180px 1fr 120px;
+            align-items: center;
+            gap: 24px;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.03);
+            transition: all 0.3s ease;
+        }
+
+        .entry-item:hover {
+            background: rgba(255, 255, 255, 0.02);
+        }
+
+        .entry-item.is-new {
+            background: linear-gradient(90deg, rgba(255, 107, 53, 0.15) 0%, rgba(255, 107, 53, 0.05) 100%);
+            border-left: 4px solid #ff6b35;
+            animation: highlight 0.6s ease;
+        }
+
+        .entry-item.unavailable {
+            opacity: 0.4;
+            background: rgba(100, 100, 100, 0.1);
+        }
+
+        .entry-item.unavailable:hover {
+            background: rgba(100, 100, 100, 0.15);
+        }
+
+        @keyframes highlight {
+            0% { background: rgba(255, 107, 53, 0.3); }
+            100% { background: linear-gradient(90deg, rgba(255, 107, 53, 0.15) 0%, rgba(255, 107, 53, 0.05) 100%); }
+        }
+
+        .new-badge {
+            background: linear-gradient(135deg, #ff6b35 0%, #f7931e 100%);
+            color: white;
+            font-size: 10px;
+            padding: 3px 10px;
+            border-radius: 12px;
+            font-weight: 800;
+            margin-left: 10px;
+            box-shadow: 0 2px 8px rgba(255, 107, 53, 0.4);
+        }
+
+        .accordion-group {
+            margin: 20px 40px;
+            background: rgba(255, 255, 255, 0.02);
+            border: 1px solid rgba(255, 255, 255, 0.05);
+            border-radius: 12px;
+            overflow: hidden;
+        }
+
+        .accordion-header {
+            padding: 20px 28px;
+            cursor: pointer;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            font-weight: 600;
+            transition: all 0.3s;
+        }
+
+        .accordion-header:hover {
+            background: rgba(255, 255, 255, 0.03);
+        }
+
+        .accordion-body {
+            display: none;
+            background: rgba(0, 0, 0, 0.3);
+        }
+
+        .accordion-body.open {
+            display: block;
+        }
+
+        .pdf-link {
+            text-decoration: none;
+            font-weight: 600;
+            font-size: 13px;
+            padding: 10px 18px;
+            border: 1px solid rgba(255, 107, 53, 0.3);
+            border-radius: 10px;
+            color: #ff6b35;
+            transition: all 0.3s;
+            text-align: center;
+            display: inline-block;
+        }
+
+        .pdf-link:hover {
+            background: rgba(255, 107, 53, 0.15);
+            border-color: #ff6b35;
+            transform: translateY(-2px);
+        }
+
+        .empty-state {
+            padding: 80px 40px;
+            text-align: center;
+            color: #555;
+            font-size: 15px;
         }
     </style>
 </head>
 <body>
-    <div class="container">
-        <div class="header">
-            <div class="icon-wrapper">🔔</div>
-            <div>
-                <h1>ISIR Monitor</h1>
+
+<div class="loader" id="loader">
+    <div class="spinner"></div>
+    <div class="loader-text">Načítání dat...</div>
+</div>
+
+<div class="landing-container" id="landing">
+    <div class="logo-landing">ISIR MONITOR</div>
+    <p class="subtitle-landing">Real-time insolvency registry monitoring</p>
+    <div class="search-landing">
+        <input type="text" id="urlInput" placeholder="Vložte URL insolvenčního řízení...">
+    </div>
+    <button class="btn-start" onclick="startMonitoring()">
+        <span style="position: relative; z-index: 1;">Spustit monitoring</span>
+    </button>
+</div>
+
+<div class="dashboard" id="dashboard">
+    <div class="header">
+        <div class="logo">ISIR MONITOR</div>
+        <div class="header-right">
+            <div class="status-indicator">
+                <div class="live-dot"></div>
+                <span style="color: #10b981; font-weight: 600; font-size: 13px;">LIVE</span>
             </div>
-        </div>
-        <p class="subtitle">Monitor Czech Insolvency Register from anywhere, in real-time</p>
-        
-        <div class="input-group">
-            <label for="url">ISIR Page URL</label>
-            <input type="url" id="url" placeholder="https://isir.justice.cz/isir/ui/rejstrik-seznam">
-        </div>
-        
-        <div class="input-group">
-            <label for="interval">Check Interval (minutes)</label>
-            <input type="number" id="interval" value="5" min="1">
-        </div>
-        
-        <div class="button-group">
-            <button class="btn btn-primary" onclick="startMonitoring()">
-                ▶ Start Monitoring
-            </button>
-            <button class="btn btn-success" onclick="checkNow()">
-                🔄 Check Now
-            </button>
-        </div>
-        
-        <div id="status" class="status-box"></div>
-        
-        <div id="monitoring" class="monitoring-status" style="display: none;">
-            <div class="pulse"></div>
-            <span>Monitoring active - Next check in <span id="countdown">-</span></span>
-        </div>
-        
-        <div class="stats" id="stats" style="display: none;">
-            <div class="stat-card">
-                <div class="stat-value" id="totalEntries">-</div>
-                <div class="stat-label">Total Entries</div>
+            <div class="timer">
+                Auto-refresh in <span id="countdown">5:00</span>
             </div>
-            <div class="stat-card">
-                <div class="stat-value" id="newEntries">0</div>
-                <div class="stat-label">New Entries</div>
-            </div>
-            <div class="stat-card">
-                <div class="stat-value" id="lastCheck">-</div>
-                <div class="stat-label">Last Check</div>
-            </div>
-        </div>
-        
-        <div class="new-entries" id="newEntries">
-            <h2 class="entries-header" style="display: none;" id="entriesHeader">
-                ⚡ New Entries Detected
-            </h2>
         </div>
     </div>
-    
-    <script>
-        let monitoringInterval = null;
-        let countdownInterval = null;
-        let nextCheckTime = null;
-        
-        function showStatus(message, type) {
-            const statusBox = document.getElementById('status');
-            statusBox.className = 'status-box show status-' + type;
-            statusBox.textContent = message;
+
+    <div id="caseInfo"></div>
+
+    <div class="tabs">
+        <div class="tab active" onclick="switchTab('A', this)">Oddíl A - Řízení do úpadku</div>
+        <div class="tab" onclick="switchTab('B', this)">Oddíl B - Řízení po úpadku</div>
+        <div class="tab" onclick="switchTab('C', this)">Oddíl C - Incidenční spory</div>
+        <div class="tab" onclick="switchTab('D', this)">Oddíl D - Ostatní</div>
+        <div class="tab" onclick="switchTab('P', this)">Oddíl P - Přihlášky</div>
+    </div>
+
+    <div id="container">
+        <div id="content-A" class="content-section active"></div>
+        <div id="content-B" class="content-section"></div>
+        <div id="content-C" class="content-section"></div>
+        <div id="content-D" class="content-section"></div>
+        <div id="content-P" class="content-section"></div>
+    </div>
+</div>
+
+<script>
+    let timer;
+    let secondsLeft = 300;
+    let monitoringUrl = '';
+
+    function startMonitoring() {
+        monitoringUrl = document.getElementById('urlInput').value;
+        if (!monitoringUrl) {
+            alert('Prosím vložte URL');
+            return;
         }
         
-        function updateCountdown() {
-            if (!nextCheckTime) return;
-            const now = Date.now();
-            const diff = Math.max(0, Math.floor((nextCheckTime - now) / 1000));
-            const mins = Math.floor(diff / 60);
-            const secs = diff % 60;
-            document.getElementById('countdown').textContent = 
-                `${mins}:${secs.toString().padStart(2, '0')}`;
-        }
+        // Fade out landing, show loader
+        const landing = document.getElementById('landing');
+        landing.classList.add('hiding');
         
-        async function checkNow() {
-            const url = document.getElementById('url').value;
-            if (!url) {
-                showStatus('Please enter a URL', 'error');
-                return;
-            }
-            
-            showStatus('Checking...', 'info');
-            
-            try {
-                const response = await fetch('/check', {
-                    method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({url})
-                });
-                
-                const data = await response.json();
-                
-                if (data.status === 'error') {
-                    showStatus('Error: ' + data.message, 'error');
-                } else if (data.status === 'initialized') {
-                    showStatus(`Monitoring initialized with ${data.count} entries`, 'success');
-                    document.getElementById('stats').style.display = 'grid';
-                    document.getElementById('totalEntries').textContent = data.count;
-                } else {
-                    showStatus(`Check complete: ${data.new_entries} new entries found`, 'success');
-                    document.getElementById('stats').style.display = 'grid';
-                    document.getElementById('totalEntries').textContent = data.total_entries;
-                    document.getElementById('newEntries').textContent = data.new_entries;
-                    document.getElementById('lastCheck').textContent = new Date().toLocaleTimeString('cs-CZ');
-                    
-                    if (data.new_entries > 0) {
-                        displayNewEntries(data.items);
-                        if ('Notification' in window && Notification.permission === 'granted') {
-                            new Notification('ISIR - New Entry!', {
-                                body: `${data.new_entries} new entries detected`
-                            });
-                        }
-                    }
-                }
-            } catch (error) {
-                showStatus('Network error: ' + error.message, 'error');
-            }
-        }
+        setTimeout(() => {
+            landing.style.display = 'none';
+            document.getElementById('loader').classList.add('active');
+        }, 300);
         
-        function displayNewEntries(items) {
-            const container = document.getElementById('newEntries');
-            const header = document.getElementById('entriesHeader');
-            header.style.display = 'flex';
-            
-            items.forEach(item => {
-                const div = document.createElement('div');
-                div.className = 'entry-item';
-                div.innerHTML = `
-                    <div class="entry-text">${item.text}</div>
-                    <div class="entry-time">⏰ Detected: ${new Date(item.timestamp).toLocaleString('cs-CZ')}</div>
-                `;
-                container.insertBefore(div, container.children[1]);
+        // Wait a bit before showing dashboard
+        setTimeout(() => {
+            triggerCheck();
+        }, 400);
+    }
+
+    async function triggerCheck() {
+        try {
+            const res = await fetch('/check', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({url: monitoringUrl})
             });
+            const data = await res.json();
+            
+            if (data.status === 'success') {
+                // Hide loader, show dashboard
+                document.getElementById('loader').classList.remove('active');
+                
+                setTimeout(() => {
+                    document.getElementById('dashboard').style.display = 'block';
+                    document.body.style.alignItems = 'flex-start';
+                    document.body.style.paddingTop = '40px';
+                }, 300);
+                
+                renderCaseInfo(data.case_info);
+                renderAll(data.sections);
+                resetTimer();
+            }
+        } catch (error) {
+            console.error('Error:', error);
+            document.getElementById('loader').classList.remove('active');
+        }
+    }
+
+    function renderCaseInfo(info) {
+        const container = document.getElementById('caseInfo');
+        if (!info || Object.keys(info).length === 0) {
+            container.innerHTML = '';
+            return;
         }
         
-        function startMonitoring() {
-            const interval = parseInt(document.getElementById('interval').value) * 60 * 1000;
-            
-            if (monitoringInterval) {
-                clearInterval(monitoringInterval);
-                clearInterval(countdownInterval);
-            }
-            
-            document.getElementById('monitoring').style.display = 'flex';
-            
-            checkNow();
-            monitoringInterval = setInterval(checkNow, interval);
-            
-            nextCheckTime = Date.now() + interval;
-            countdownInterval = setInterval(() => {
-                updateCountdown();
-                if (Date.now() >= nextCheckTime) {
-                    nextCheckTime = Date.now() + interval;
-                }
-            }, 1000);
-            
-            if ('Notification' in window && Notification.permission !== 'granted') {
-                Notification.requestPermission();
+        let caseNumberHtml = '';
+        if (info.case_number) {
+            caseNumberHtml = `<strong>${info.case_number}</strong>`;
+            if (info.court) {
+                caseNumberHtml += ` vedená u <strong>${info.court}</strong>`;
             }
         }
-    </script>
+        
+        container.innerHTML = `
+            <div class="case-info-box">
+                <div class="case-info-title">${info.name || 'Detail insolvenčního řízení'}</div>
+                ${info.status ? `
+                    <div class="case-info-row">
+                        <div class="case-info-label">Aktuální stav</div>
+                        <div class="case-info-value">${info.status}</div>
+                    </div>
+                ` : ''}
+                ${caseNumberHtml ? `
+                    <div class="case-info-row">
+                        <div class="case-info-label">Spisová značka</div>
+                        <div class="case-info-value">${caseNumberHtml}</div>
+                    </div>
+                ` : ''}
+            </div>
+        `;
+    }
+
+    function renderAll(sections) {
+        ['A', 'B', 'D'].forEach(s => renderFlat(s, sections[s] || []));
+        ['C', 'P'].forEach(s => renderGrouped(s, sections[s] || []));
+    }
+
+    function renderFlat(id, items) {
+        const el = document.getElementById(`content-${id}`);
+        if (!items || items.length === 0) {
+            el.innerHTML = '<div class="empty-state">Žádné záznamy</div>';
+            return;
+        }
+        
+        el.innerHTML = items.map(i => {
+            const unavailableClass = i.is_greyed || !i.has_valid_doc ? 'unavailable' : '';
+            const newBadge = i.is_new && !unavailableClass ? '<span class="new-badge">NOVÝ</span>' : '';
+            const pdfLink = i.pdf_url !== '#' && i.has_valid_doc 
+                ? `<a href="${i.pdf_url}" target="_blank" class="pdf-link">PDF</a>` 
+                : '<span style="color:#555; font-size:13px">—</span>';
+            
+            return `
+            <div class="entry-item ${i.is_new ? 'is-new' : ''} ${unavailableClass}">
+                <div style="font-weight:700; color:#fff">
+                    ${i.id}${newBadge}
+                </div>
+                <div style="color:#888; font-size:13px">${i.time}</div>
+                <div style="font-size:14px; color:#ccc">${i.desc}</div>
+                ${pdfLink}
+            </div>`;
+        }).join('');
+    }
+
+    function renderGrouped(id, groups) {
+        const el = document.getElementById(`content-${id}`);
+        if (!groups || groups.length === 0) {
+            el.innerHTML = '<div class="empty-state">Žádné záznamy</div>';
+            return;
+        }
+        
+        el.innerHTML = groups.map(g => {
+            const hasNew = g.entries.some(e => e.is_new && !e.is_greyed && e.has_valid_doc);
+            return `
+            <div class="accordion-group">
+                <div class="accordion-header" onclick="this.nextElementSibling.classList.toggle('open')">
+                    <div>
+                        <div style="color:#fff">${g.group} ${hasNew ? '<span class="new-badge">AKTUALIZACE</span>' : ''}</div>
+                        ${g.metadata ? `<div class="group-header-meta">${g.metadata}</div>` : ''}
+                    </div>
+                    <span style="font-size:12px; color:#ff6b35">▼</span>
+                </div>
+                <div class="accordion-body">
+                    ${g.entries.map(i => {
+                        const unavailableClass = i.is_greyed || !i.has_valid_doc ? 'unavailable' : '';
+                        const newBadge = i.is_new && !unavailableClass ? '<span class="new-badge">NOVÝ</span>' : '';
+                        const pdfLink = i.pdf_url !== '#' && i.has_valid_doc
+                            ? `<a href="${i.pdf_url}" target="_blank" class="pdf-link">PDF</a>`
+                            : '<span style="color:#555; font-size:13px">—</span>';
+                        
+                        return `
+                        <div class="entry-item ${i.is_new && !unavailableClass ? 'is-new' : ''} ${unavailableClass}">
+                            <div style="font-weight:700; color:#fff">${i.id}${newBadge}</div>
+                            <div style="color:#888; font-size:13px">${i.time}</div>
+                            <div style="font-size:14px; color:#ccc">${i.desc}</div>
+                            ${pdfLink}
+                        </div>`;
+                    }).join('')}
+                </div>
+            </div>`;
+        }).join('');
+    }
+
+    function resetTimer() {
+        secondsLeft = 300;
+        if (timer) clearInterval(timer);
+        timer = setInterval(() => {
+            secondsLeft--;
+            const m = Math.floor(secondsLeft / 60);
+            const s = secondsLeft % 60;
+            document.getElementById('countdown').innerText = `${m}:${s < 10 ? '0' : ''}${s}`;
+            if (secondsLeft <= 0) triggerCheck();
+        }, 1000);
+    }
+
+    function switchTab(s, el) {
+        document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+        el.classList.add('active');
+        document.querySelectorAll('.content-section').forEach(c => c.classList.remove('active'));
+        document.getElementById(`content-${s}`).classList.add('active');
+    }
+</script>
 </body>
 </html>
 """
 
 @app.route('/')
-def index():
-    return HTML_TEMPLATE
+def index(): return HTML_TEMPLATE
 
 @app.route('/check', methods=['POST'])
 def check():
-    data = request.json
-    url = data.get('url')
-    
-    if not url:
-        return jsonify({"status": "error", "message": "No URL provided"})
-    
-    result = checker.check_url(url)
-    return jsonify(result)
-
-@app.route('/status')
-def status():
-    return jsonify({
-        "monitored_urls": list(CONFIG["monitored_urls"].keys()),
-        "new_entries": checker.new_entries[-10:]  # Last 10 new entries
-    })
+    url = request.json.get('url')
+    return jsonify(checker.fetch_and_parse(url))
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000, debug=True)
+    app.run(debug=True, port=5000)
