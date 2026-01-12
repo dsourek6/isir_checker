@@ -26,6 +26,9 @@ class ISIRChecker:
         return [int(text) if text.isdigit() else text.lower() for text in re.split('([0-9]+)', s)]
 
     def fetch_and_parse(self, url: str) -> Dict[str, Any]:
+        base_url = url.split('&')[0]
+        params = "&actSheet=B&pageA=all&pageB=all&pageD=all&pageP=all&pageC=all"
+        full_url = f"{base_url}{params}"
         """
         Main function that:
         1. Fetches the HTML from the ISIR URL
@@ -36,7 +39,7 @@ class ISIRChecker:
         try:
             # === STEP 1: FETCH THE PAGE ===
             headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36'}
-            response = requests.get(url, headers=headers, timeout=20)
+            response = requests.get(full_url, headers=headers, timeout=20)
             response.raise_for_status()  # Raises error if request failed
             
             # === STEP 2: PARSE HTML ===
@@ -912,4 +915,3 @@ def check():
 
 if __name__ == '__main__':
     app.run(debug=True, port=5000)
-
