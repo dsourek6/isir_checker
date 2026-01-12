@@ -105,13 +105,13 @@ class ISIRChecker:
                     desc = cells[3].get_text(separator=' ', strip=True)
                     
                     # === CHECK IF ENTRY IS GREYED OUT (INVALID/UNAVAILABLE) ===
-                    # Greyed entries don't have the 'posledniCislo' class in their spans
+                    # Greyed entries have the 'posledniCislo' class in their spans
                     is_greyed = False
                     first_span = cells[0].find('span')
                     if first_span:
                         span_classes = first_span.get('class', [])
-                        # If the span doesn't have 'posledniCislo' class, it's greyed out
-                        if 'posledniCislo' not in span_classes:
+                        # If the span has 'posledniCislo' class, it's greyed out
+                        if 'posledniCislo' in span_classes:
                             is_greyed = True
                     
                     # === FIND PDF LINK ===
@@ -912,3 +912,4 @@ def check():
 
 if __name__ == '__main__':
     app.run(debug=True, port=5000)
+
